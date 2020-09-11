@@ -1,15 +1,17 @@
 import asyncio
 import csv
 import logging
+import multiprocessing
 import socket
 import ssl
+from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict
 from urllib.parse import urlparse
 
 
 logging.basicConfig(level=logging.INFO)
-
+pool = ThreadPoolExecutor(max_workers=multiprocessing.cpu_count())
 
 async def checker(url: str) -> Dict[str, Any]:
     """
@@ -24,8 +26,6 @@ async def checker(url: str) -> Dict[str, Any]:
         - desc: Description status
         - validityExpires: timestamp expire cert
     """
-
-    logging.info(f"Start check {url}")
 
     result = {
         "url": url,
@@ -58,10 +58,14 @@ async def checker(url: str) -> Dict[str, Any]:
         return result
     context = ssl.create_default_context()
     try:
-        with socket.create_connection((hostname, port), timeout=5) as sock:
-            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
-                expire = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+        def sync_checker():
+            with socket.create_connection((hostname, port), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    return datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+
+        expire = await asyncio.get_event_loop().run_in_executor(pool, sync_checker)
+
     except ssl.SSLError as e:
         result.update({
             "result": "BAD",
@@ -96,10 +100,12 @@ async def checker(url: str) -> Dict[str, Any]:
     return result
 
 
-async def task(writer, queue: asyncio.Queue):
+async def task(name, writer, queue: asyncio.Queue):
     while not queue.empty():
         url: str = await queue.get()
-        result = await checker(url.strip())
+        url = url.strip()
+        logging.info(f"Start check {url} on {name}")
+        result = await checker(url)
         writer.writerow([
             result["url"],
             result["hostname"],
@@ -126,10 +132,10 @@ async def main():
             "validityExpires"
         ])
         await asyncio.gather(
-            asyncio.create_task(task(writer, queue)),
-            asyncio.create_task(task(writer, queue)),
-            asyncio.create_task(task(writer, queue)),
-            asyncio.create_task(task(writer, queue)),
+            asyncio.create_task(task("1", writer, queue)),
+            asyncio.create_task(task("2", writer, queue)),
+            asyncio.create_task(task("3", writer, queue)),
+            asyncio.create_task(task("4", writer, queue)),
         )
 
 if __name__ == '__main__':
